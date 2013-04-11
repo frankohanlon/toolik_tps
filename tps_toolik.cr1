@@ -1,0 +1,188 @@
+'CR1000 Series Datalogger
+' Wiring:
+
+' TPS-3100 Sensor
+'Wire      Purpose         Datalogger
+'____________________________________
+' Pin 2    RS232 TPSc1 RX    C5         (white)
+' Pin 3    RS232 TPSc1 TX    C6         (red)
+' Pin 5    RS232 Gc1         G          (black, green)
+
+'CS10_L sensor (actually a CS15_L)
+' CS10 white                 SE1
+' CS10 red                    AG
+' CS10 black                  AG
+' CS10 clear                  AG
+
+' SR50A Sonic Snow Depth Sensor
+' SDI Bus (Green Wire) -- CR1000 C3
+' SDI Ground (White Wire) -- CR1000 G
+' Power + (Red Wire) -- CR1000 12V
+' Power - (Black Wire) -- CR1000 G
+' Shield (Clear Wire) -- CR1000 G
+
+' TPS Power Relay
+' A1 -- CR1000 SW12V
+' A2 -- CR1000 G
+' 11 -- TPS AC Hot Wire
+' 12 -- Toolik AC Hot Wire
+
+Public TPS_out_format As String *3
+Public TPS_timestamp As String * 10
+Public TPS_Fault_Ind As String * 7
+Public TPS_cur_precip As Float
+Public TPS_accum_precip As Float
+Public TPS_AT As Float
+Public TPS_Inst_Temp As Float
+Public TPS_WS As Float
+Public TPS_CRC As String *4
+Public callstring As String * 3
+Public TPS_String As String * 200
+Public LoggerTemp_C As Float
+Public BattVolts_V As Float
+Const num_samples = 100
+Public Amps
+Public Amp_mult
+Dim i_sig(num_samples)
+Public SR50(2) As Float
+Alias SR50(1) = uncorrected_distance
+Alias SR50(2) = signalQuality
+Public Depth As Float
+Public distance_sr50_to_ground As Float
+Public corrected_distance As Float
+Public init_snow_setup As Boolean
+Public tps_reset As Boolean
+Public tps_minute_counter As Long
+Public tps_reset_counter As Long
+PreserveVariables
+
+'\\\\\\\\\\\\\\\\\\\\\\\\ OUTPUT SECTION ////////////////////////
+
+DataTable(TPSerrors,True,-1)
+  DataInterval(0,1440,min,0)
+  Sample(1,tps_reset_counter,Long)
+EndTable
+DataTable(TableTPSplus,true,-1)
+  DataInterval(0,1,Min,0)
+  Sample(1, TPS_out_format, FP2)
+  Sample(1, TPS_timestamp, String)
+  Sample(1, TPS_Fault_Ind, String)
+  Sample(1, TPS_cur_precip,FP2)
+  Sample(1, TPS_accum_precip,FP2)
+  Sample(1, TPS_AT, FP2)
+  Sample(1, TPS_Inst_Temp, FP2)
+  Sample(1, TPS_WS, FP2)
+  Sample(1, TPS_CRC, String)
+EndTable
+
+DataTable(AmpTable,True,-1)
+  DataInterval(0,1,Min,10)
+  Maximum(1,Amps,IEEE4,False,False)
+  Average(1,Amps,FP2,False)
+EndTable
+  
+
+DataTable(HourlyDiag,true,-1)
+  DataInterval(0,60,Min,10)
+  Sample(1, LoggerTemp_C,FP2)
+  Average(1,LoggerTemp_C,FP2,False)
+  Sample(1,BattVolts_V,FP2)
+  Average(1,BattVolts_V,FP2,False)
+  Maximum(1,BattVolts_V,FP2,False,False)
+  Minimum(1,BattVolts_V,FP2,False,False)  
+EndTable
+  
+  DataTable(DepthSensor,true,-1)
+    DataInterval(0,5,Min,10)
+    Sample(1,uncorrected_distance,fp2)
+    Sample(1,Depth,FP2)
+  EndTable
+    
+
+'\\\\\\\\\\\\\\\\\\\\\\\\\\\ PROGRAM ////////////////////////////
+
+BeginProg
+  'Scan( 1,Min, 3, 0)
+  Scan(250,mSec,10,0)
+   SequentialMode
+  'PipeLineMode
+    '----------
+    ' Current sensor
+    '----------
+    
+    Amp_mult = 0.2
+    VoltSe(i_sig(1),num_samples,mV2500,-1,True,1000,0,1.0,0)
+    StdDevSpa(Amps,num_samples,i_sig(1))
+    Amps = Amps * Amp_mult
+    CallTable AmpTable
+  
+    If IfTime(0,60,Sec) Then
+      'SequentialMode
+      '''''''''''''''''''''''''''''''''''''''''
+      ''' Measure TPS C1'''''''''''''''''''''''''
+      '''''''''''''''''''''''''''''''''''''''''
+       callstring  = CHR (13 )  & CHR (13 )  &  "T" & CHR (13 ) 
+      ' 1) open the serial port
+      SerialOpen (Com3,9600,0,300,10000)
+      ' 2) flush the port
+      SerialFlush (Com3)
+      ' 3) Send the transmit code and put the response into variable TPS_String
+      SerialOut (Com3,callstring,"",3,0)
+      SerialIn (TPS_String,Com3,100,-1,100)
+      ' 4) Close the serial port
+      SerialClose (Com3)
+      ' 5) Comma separate the string from the TPS
+      'SplitStr (TPS_Array1(),TPS_String,",",8,2)
+      ' 6) Space separate the first bit o' data
+      'SplitStr (TPS_Array2(),TPS_Array1(1)," ",2,2)
+      ' 7) Star separate the last bit o' data
+      'SplitStr (TPS_Array3(),TPS_Array1(8),"*",2,2)
+      TPS_out_format = Mid (TPS_String,3,3)
+      TPS_timestamp = Mid(TPS_String,7,10)
+      TPS_Fault_Ind = Mid(TPS_String,18,7)
+      TPS_cur_precip = Mid(TPS_String,26,5)
+      TPS_accum_precip = Mid(TPS_String,32,8)
+      TPS_AT = Mid(TPS_String,41,5)
+      TPS_Inst_Temp = Mid(TPS_String,47,5)
+      TPS_WS = Mid(TPS_String,53,4)
+      TPS_CRC = Mid(TPS_String,58,4)
+      ' tps reset sequence
+      If TPS_String = "" Then
+        If tps_reset = false Then
+          tps_reset = true
+          tps_reset_counter = tps_reset_counter + 1
+          tps_minute_counter = 0
+          PortSet(9,1)   
+        EndIf
+      EndIf
+      If tps_reset = true Then
+         tps_minute_counter = tps_minute_counter + 1
+         If tps_minute_counter = 2 Then PortSet(9,0)
+      EndIf
+      If tps_minute_counter >20 Then tps_reset = false
+        
+      Battery (BattVolts_V)
+      PanelTemp (LoggerTemp_C,250)
+
+    
+      '------------------------------------------------
+      'Log sensor output once an hour
+     
+      CallTable tpserrors      
+      CallTable TableTPSplus
+      CallTable HourlyDiag
+    EndIf
+    If IfTime(0,300,Sec) Then
+      If init_snow_setup = false Then
+        distance_sr50_to_ground = 145 'centimeters
+        init_snow_setup=true
+      EndIf
+      
+      
+      SDI12Recorder(SR50(),3,0,"C!",100.0,0.0) 
+      corrected_distance = uncorrected_distance * SQR((TPS_AT + 273.15) / 273.15)
+      Depth = distance_sr50_to_ground - corrected_distance 
+      CallTable DepthSensor
+    EndIf
+  NextScan
+EndProg
